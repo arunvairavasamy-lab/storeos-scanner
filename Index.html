@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <base target="_top">
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>GST QR Scanner</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, Roboto, Arial, sans-serif;
+      margin: 0;
+      padding: 16px;
+      max-width: 480px;
+      margin-inline: auto;
+      background: #fafafa;
+    }
+    h3 { margin: 0 0 12px; font-size: 17px; color: #222; }
+    #reader {
+      width: 100%;
+      border-radius: 10px;
+      overflow: hidden;
+      background: #000;
+      min-height: 260px;
+    }
+    #status {
+      margin-top: 12px;
+      padding: 10px 12px;
+      border-radius: 8px;
+      font-size: 14px;
+      line-height: 1.4;
+    }
+    .info { background: #eef1f4; color: #333; }
+    .ok   { background: #e6f4ea; color: #1e7e34; }
+    .err  { background: #fdecea; color: #b3261e; }
+    #retryBtn {
+      display: none;
+      margin-top: 10px;
+      padding: 10px 16px;
+      font-size: 14px;
+      border: none;
+      border-radius: 8px;
+      background: #1a73e8;
+      color: #fff;
+      cursor: pointer;
+    }
+    #retryBtn:active { background: #1558b0; }
+  </style>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/html5-qrcode/2.3.8/html5-qrcode.min.js"></script>
+</head>
+<body>
+  <h3>Scan GST e-Invoice QR Code</h3>
+  <div id="reader"></div>
+  <div id="status" class="info">Requesting camera access...</div>
+  <button id="retryBtn">Retry Camera</button>
+
+  <script>
+  (function () {
+    var READER_ID = 'reader';
+    var html5QrCode = null;
+    var isProcessing = false;      // guards against double-handling one scan
+    var lastWorkingSource = null;  // camera constraint/id that worked, reused for fast restarts
+
+    var statusEl = document.getElementById('status');
+    var retryBtn = document.getElementById('retryBtn');
+
+    function setStatus(msg, cls) {
+      statusEl.textContent = msg;
+      statusEl.className = cls;
+    }
+
+    // Decodes the payload segment of a JWT/JWS. Signature is NOT verified.
+    function decodeJwtPayload(token) {
+      var parts = token.split('.');
+      if (parts.length < 2) {
+        throw new Error('Scanned text is not a JWT/JWS (no "." separators).');
+      }
+      var base64 = parts[1].replace(/-/g, '+').replace(/_/g, '/');
+      while (base64.length % 4) base64 += '=';
+      var decoded = atob(base64);
+      var jsonStr = decodeURIComponent(
+        decoded.split('').map(function (c) {
+          return '%' + ('00' + c.charCodeAt(0).toString(16)).slice(-2);
+        }).join('')
+      );
+      return JSON.parse(jsonStr);
+    }
+
+    // fps 20 + native BarcodeDetector (when available in Chrome/Chromium)
+    // gives sub-2-second reads under normal lighting on modern phones.
+    var qrConfig = {
+      fps: 20,
+      qrbox: { width: 260, height: 260 },
+      aspectRatio: 1.0,
+      disableFlip: false,
+      experimentalFeatures: { useBarCodeDetectorIfSupported: true }
+    };
+
+    function onScanFailure() {
+      // Fires on every frame with no QR in view — intentional no-op,
+      // must not touch the DOM or it'll thrash the UI at 20fps.
+    }
+
+    function onScanSuccess(decodedText) {
+      if (isProcessing) return;
+      isProcessing = true;
+
+      html5QrCode.pause(true); // freeze video immediately; cheaper/faster than stop()
+      setStatus('QR captured — decoding...', 'info');
+
+      var payload;
+      try {
+        payload = decodeJwtPayload(decodedText);
+      } catch (err) {
+        setStatus('Decode failed: ' + err.message, 'err');
+        resumeAfterDelay();
+        return;
+      }
+
+      setStatus('Saving to Sheet...', 'info');
+      google.script.run
+        .withSuccessHandler(function (res) {
+          setStatus('Saved — row ' + res.row + '. Ready for next scan.', 'ok');
+          resumeAfterDelay();
+        })
+        .withFailureHandler(function (err) {
+          setStatus('Save failed: ' + (err && err.message ? err.message : err), 'err');
+          resumeAfterDelay();
+        })
+        .saveInvoiceData(payload);
+    }
+
+    function resumeAfterDelay() {
+      setTimeout(function () {
+        isProcessing = false;
+        try {
+          html5QrCode.resume();
+          setStatus('Point camera at next QR code.', 'info');
+        } catch (e) {
+          // Scanner state got corrupted (rare) — do a full clean restart.
+          html5QrCode.stop().catch(function () {}).then(startScanner);
+        }
+      }, 1200);
+    }
+
+    function tryStart(cameraIdOrConfig) {
+      return html5QrCode.start(cameraIdOrConfig, qrConfig, onScanSuccess, onScanFailure);
+    }
+
+    function startScanner() {
+      retryBtn.style.display = 'none';
+      setStatus('Starting camera...', 'info');
+      isProcessing = false;
+
+      if (!html5QrCode) {
+        html5QrCode = new Html5Qrcode(READER_ID, /* verbose= */ false);
+      }
+
+      // Fast path: reuse whatever source worked before (e.g. after a manual retry).
+      if (lastWorkingSource) {
+        tryStart(lastWorkingSource).catch(function () {
+          lastWorkingSource = null;
+          runDetectionChain();
+        });
+        return;
+      }
+
+      runDetectionChain();
+    }
+
+    // Ordered fallback: exact rear camera (best on Android Chrome/Samsung
+    // Internet) -> relaxed rear hint (works on both mobile and, harmlessly
+    // ignored, on desktop) -> explicit device enumeration as a last resort.
+    function runDetectionChain() {
+      var constraintAttempts = [
+        { facingMode: { exact: 'environment' } },
+        { facingMode: 'environment' }
+      ];
+
+      function tryNextConstraint(i) {
+        if (i >= constraintAttempts.length) {
+          fallbackToDeviceList();
+          return;
+        }
+        tryStart(constraintAttempts[i]).then(function () {
+          lastWorkingSource = constraintAttempts[i];
+        }).catch(function () {
+          tryNextConstraint(i + 1);
+        });
+      }
+
+      tryNextConstraint(0);
+    }
+
+    function fallbackToDeviceList() {
+      Html5Qrcode.getCameras().then(function (cameras) {
+        if (!cameras || cameras.length === 0) {
+          throw { name: 'NotFoundError', message: 'No camera devices found.' };
+        }
+        var rear = cameras.find(function (c) { return /back|rear|environment/i.test(c.label); });
+        var chosen = rear || cameras[cameras.length - 1] || cameras[0];
+        return tryStart(chosen.id).then(function () {
+          lastWorkingSource = chosen.id;
+        });
+      }).catch(handleStartError);
+    }
+
+    function handleStartError(err) {
+      var name = (err && err.name) || '';
+      var msg;
+      if (name === 'NotAllowedError') {
+        msg = 'Camera permission denied. Allow camera access for this page in your browser settings, then retry.';
+      } else if (name === 'NotFoundError') {
+        msg = 'No camera found on this device.';
+      } else if (name === 'NotReadableError') {
+        msg = 'Camera is already in use by another app. Close it, then retry.';
+      } else if (name === 'OverconstrainedError') {
+        msg = 'Requested camera mode is not supported on this device.';
+      } else {
+        msg = 'Camera error: ' + (err && err.message ? err.message : err);
+      }
+      setStatus(msg, 'err');
+      retryBtn.style.display = 'inline-block';
+    }
+
+    retryBtn.addEventListener('click', startScanner);
+    window.addEventListener('load', startScanner);
+  })();
+  </script>
+</body>
+</html>
