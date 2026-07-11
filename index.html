@@ -105,17 +105,31 @@
     }
 
 var qrConfig = {
-  fps: 10,
-  qrbox: {
-    width: 320,
-    height: 320
-  },
-  aspectRatio: 1.0,
-  disableFlip: true,
-  experimentalFeatures: {
-    useBarCodeDetectorIfSupported: false
-  }
+  ...
 };
+
+function onScanFailure(errorMessage) {
+  // Do nothing
+}
+
+function onScanSuccess(decodedText) {
+    alert("Length = " + decodedText.length);
+    alert(decodedText);
+
+    if (isProcessing) return;
+    isProcessing = true;
+
+    html5QrCode.pause(true);
+    setStatus('QR captured — decoding...', 'info');
+
+    var payload;
+
+    decodedText = decodedText.trim();
+
+    try {
+        payload = decodeJwtPayload(decodedText);
+    ...
+}
 
     function onScanSuccess(decodedText) {
     alert("Length = " + decodedText.length);  
