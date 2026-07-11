@@ -59,8 +59,7 @@
     // REQUIRED: paste your deployed Apps Script Web App /exec URL here.
     // Example: https://script.google.com/macros/s/AKfycbXXXXXXXXXXXXXXXXX/exec
     // ======================================================================
-    var APPS_SCRIPT_URL = 'PASTE_YOUR_DEPLOYED_WEB_APP_EXEC_URL_HERE';
-
+    var APPS_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbxMYok0hRCAavfIsIVHyOZJ45aqfH8Gnpu2OjgjvNP4nvelYaemWGoni8d8KtaG5sDJ/exec';
     var READER_ID = 'reader';
     var html5QrCode = null;
     var isProcessing = false;
@@ -117,13 +116,18 @@
     }
 
     function onScanSuccess(decodedText) {
-      if (isProcessing) return;
-      isProcessing = true;
 
+  alert("Length = " + decodedText.length);
+  alert(decodedText);
+
+  if (isProcessing) return;
+      isProcessing = true;
+      
       html5QrCode.pause(true);
       setStatus('QR captured — decoding...', 'info');
 
       var payload;
+      decodedText = decodedText.trim();
       try {
         payload = decodeJwtPayload(decodedText);
       } catch (err) {
