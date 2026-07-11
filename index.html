@@ -15,12 +15,21 @@
       background: #fafafa;
     }
     h3 { margin: 0 0 12px; font-size: 17px; color: #222; }
-    #reader {
+    #videoWrap {
       width: 100%;
       border-radius: 10px;
       overflow: hidden;
       background: #000;
-      min-height: 260px;
+      min-height: 320px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    #video {
+      width: 100%;
+      height: 320px;
+      object-fit: cover;
+      display: block;
     }
     #status {
       margin-top: 12px;
@@ -44,29 +53,45 @@
       cursor: pointer;
     }
     #retryBtn:active { background: #1558b0; }
+    #hint {
+      margin-top: 10px;
+      font-size: 12px;
+      color: #777;
+      line-height: 1.4;
+    }
   </style>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/html5-qrcode/2.3.8/html5-qrcode.min.js"></script>
+  <script src="https://unpkg.com/@zxing/[email protected]/umd/index.min.js"></script>
+  <script src="https://unpkg.com/@zxing/[email protected]/umd/index.min.js"></script>
 </head>
 <body>
   <h3>Scan GST e-Invoice QR Code</h3>
-  <div id="reader"></div>
+  <div id="videoWrap">
+    <video id="video" playsinline muted autoplay></video>
+  </div>
   <div id="status" class="info">Requesting camera access...</div>
   <button id="retryBtn">Retry Camera</button>
+  <div id="hint">
+    Tip: for printed invoices, hold the phone steady about 10–15 cm from the
+    QR code, fill as much of the frame as possible, and scan in good light —
+    dense GST e-Invoice QR codes have very small modules and need sharp,
+    well-lit focus to resolve reliably.
+  </div>
 
   <script>
   (function () {
     // ======================================================================
     // REQUIRED: paste your deployed Apps Script Web App /exec URL here.
-    // Example: https://script.google.com/macros/s/AKfycbXXXXXXXXXXXXXXXXX/exec
     // ======================================================================
-    var APPS_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbxMYok0hRCAavfIsIVHyOZJ45aqfH8Gnpu2OjgjvNP4nvelYaemWGoni8d8KtaG5sDJ/exec';
-    var READER_ID = 'reader';
-    var html5QrCode = null;
-    var isProcessing = false;
-    var lastWorkingSource = null;
+    var APPS_SCRIPT_URL = 'PASTE_YOUR_DEPLOYED_WEB_APP_EXEC_URL_HERE';
 
+    var videoEl = document.getElementById('video');
     var statusEl = document.getElementById('status');
     var retryBtn = document.getElementById('retryBtn');
+
+    var codeReader = null;
+    var scannerControls = null;
+    var isProcessing = false;
+    var lastWorkingDeviceId = null;
 
     function setStatus(msg, cls) {
       statusEl.textContent = msg;
@@ -90,9 +115,8 @@
       return JSON.parse(jsonStr);
     }
 
-    // Posts to Apps Script as text/plain on purpose — this keeps the
-    // request a CORS "simple request" and avoids a preflight OPTIONS
-    // call that Apps Script cannot answer.
+    // text/plain keeps this a CORS "simple request" — no preflight, which
+    // Apps Script cannot answer with proper CORS headers anyway.
     function postToAppsScript(payload) {
       return fetch(APPS_SCRIPT_URL, {
         method: 'POST',
@@ -103,33 +127,34 @@
       });
     }
 
-    var qrConfig = {
-      fps: 20,
-      qrbox: { width: 260, height: 260 },
-      aspectRatio: 1.0,
-      disableFlip: false,
-      experimentalFeatures: { useBarCodeDetectorIfSupported: true }
-    };
-
-    function onScanFailure() {
-      // Fires every frame with no QR in view — intentional no-op.
+    function buildHints() {
+      var hints = new Map();
+      // TRY_HARDER is the key setting for dense/high-version printed QR codes —
+      // it enables ZXing's more exhaustive binarization and finder-pattern
+      // search passes instead of the fast/shallow path used by default.
+      hints.set(ZXing.DecodeHintType.TRY_HARDER, true);
+      hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, [ZXing.BarcodeFormat.QR_CODE]);
+      return hints;
     }
 
-    function onScanSuccess(decodedText) {
+    function createReader() {
+      var hints = buildHints();
+      return new ZXingBrowser.BrowserMultiFormatReader(hints, {
+        delayBetweenScanAttempts: 100,
+        delayBetweenScanSuccess: 500
+      });
+    }
 
-  alert("Length = " + decodedText.length);
-  alert(decodedText);
-
-  if (isProcessing) return;
+    function onDecodeResult(result) {
+      if (isProcessing) return;
       isProcessing = true;
-      
-      html5QrCode.pause(true);
+
+      var text = result.getText();
       setStatus('QR captured — decoding...', 'info');
 
       var payload;
-      decodedText = decodedText.trim();
       try {
-        payload = decodeJwtPayload(decodedText);
+        payload = decodeJwtPayload(text);
       } catch (err) {
         setStatus('Decode failed: ' + err.message, 'err');
         resumeAfterDelay();
@@ -155,17 +180,45 @@
     function resumeAfterDelay() {
       setTimeout(function () {
         isProcessing = false;
-        try {
-          html5QrCode.resume();
-          setStatus('Point camera at next QR code.', 'info');
-        } catch (e) {
-          html5QrCode.stop().catch(function () {}).then(startScanner);
-        }
+        setStatus('Point camera at next QR code.', 'info');
       }, 1200);
     }
 
-    function tryStart(cameraIdOrConfig) {
-      return html5QrCode.start(cameraIdOrConfig, qrConfig, onScanSuccess, onScanFailure);
+    // ZXing calls this continuously — result is null on almost every frame
+    // (no code in view yet), which is normal and must be ignored silently.
+    function decodeCallback(result, err, controls) {
+      scannerControls = controls;
+      if (result) {
+        onDecodeResult(result);
+      }
+    }
+
+    function startWithConstraints() {
+      var constraints = {
+        audio: false,
+        video: {
+          facingMode: { ideal: 'environment' },
+          // High resolution matters more than almost anything else for
+          // dense printed GST QR codes — low-res streams can't resolve
+          // the small modules of a high-version (2000+ char payload) code.
+          width: { ideal: 1920 },
+          height: { ideal: 1080 },
+          advanced: [{ focusMode: 'continuous' }]
+        }
+      };
+      return codeReader.decodeFromConstraints(constraints, videoEl, decodeCallback);
+    }
+
+    function startWithDeviceList() {
+      return ZXingBrowser.BrowserCodeReader.listVideoInputDevices().then(function (devices) {
+        if (!devices || devices.length === 0) {
+          throw { name: 'NotFoundError', message: 'No camera devices found.' };
+        }
+        var rear = devices.find(function (d) { return /back|rear|environment/i.test(d.label); });
+        var chosen = rear || devices[devices.length - 1] || devices[0];
+        lastWorkingDeviceId = chosen.deviceId;
+        return codeReader.decodeFromVideoDevice(chosen.deviceId, videoEl, decodeCallback);
+      });
     }
 
     function startScanner() {
@@ -173,15 +226,17 @@
       setStatus('Starting camera...', 'info');
       isProcessing = false;
 
-      if (!html5QrCode) {
-        html5QrCode = new Html5Qrcode(READER_ID, false);
+      if (!codeReader) {
+        codeReader = createReader();
       }
 
-      if (lastWorkingSource) {
-        tryStart(lastWorkingSource).catch(function () {
-          lastWorkingSource = null;
-          runDetectionChain();
-        });
+      if (lastWorkingDeviceId) {
+        codeReader.decodeFromVideoDevice(lastWorkingDeviceId, videoEl, decodeCallback)
+          .then(function (controls) { scannerControls = controls; })
+          .catch(function () {
+            lastWorkingDeviceId = null;
+            runDetectionChain();
+          });
         return;
       }
 
@@ -189,37 +244,13 @@
     }
 
     function runDetectionChain() {
-      var constraintAttempts = [
-        { facingMode: { exact: 'environment' } },
-        { facingMode: 'environment' }
-      ];
-
-      function tryNextConstraint(i) {
-        if (i >= constraintAttempts.length) {
-          fallbackToDeviceList();
-          return;
-        }
-        tryStart(constraintAttempts[i]).then(function () {
-          lastWorkingSource = constraintAttempts[i];
-        }).catch(function () {
-          tryNextConstraint(i + 1);
+      startWithConstraints()
+        .then(function (controls) { scannerControls = controls; })
+        .catch(function () {
+          // Constraint-based start failed outright (rare) — fall back to
+          // explicit device enumeration and label matching.
+          startWithDeviceList().catch(handleStartError);
         });
-      }
-
-      tryNextConstraint(0);
-    }
-
-    function fallbackToDeviceList() {
-      Html5Qrcode.getCameras().then(function (cameras) {
-        if (!cameras || cameras.length === 0) {
-          throw { name: 'NotFoundError', message: 'No camera devices found.' };
-        }
-        var rear = cameras.find(function (c) { return /back|rear|environment/i.test(c.label); });
-        var chosen = rear || cameras[cameras.length - 1] || cameras[0];
-        return tryStart(chosen.id).then(function () {
-          lastWorkingSource = chosen.id;
-        });
-      }).catch(handleStartError);
     }
 
     function handleStartError(err) {
@@ -240,7 +271,13 @@
       retryBtn.style.display = 'inline-block';
     }
 
-    retryBtn.addEventListener('click', startScanner);
+    retryBtn.addEventListener('click', function () {
+      if (scannerControls) {
+        try { scannerControls.stop(); } catch (e) {}
+      }
+      startScanner();
+    });
+
     window.addEventListener('load', startScanner);
   })();
   </script>
