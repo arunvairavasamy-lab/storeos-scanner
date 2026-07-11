@@ -119,6 +119,8 @@ var qrConfig = {
 
     function onScanSuccess(decodedText) {
     alert("Length = " + decodedText.length);  
+    alert(decodedText);
+      
       if (isProcessing) return;
       isProcessing = true;
 
