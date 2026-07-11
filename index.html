@@ -104,17 +104,18 @@
       });
     }
 
-    var qrConfig = {
-      fps: 20,
-      qrbox: { width: 260, height: 260 },
-      aspectRatio: 1.0,
-      disableFlip: false,
-      experimentalFeatures: { useBarCodeDetectorIfSupported: true }
-    };
-
-    function onScanFailure() {
-      // Fires every frame with no QR in view — intentional no-op.
-    }
+var qrConfig = {
+  fps: 10,
+  qrbox: {
+    width: 320,
+    height: 320
+  },
+  aspectRatio: 1.0,
+  disableFlip: true,
+  experimentalFeatures: {
+    useBarCodeDetectorIfSupported: false
+  }
+};
 
     function onScanSuccess(decodedText) {
       if (isProcessing) return;
@@ -123,9 +124,12 @@
       html5QrCode.pause(true);
       setStatus('QR captured — decoding...', 'info');
 
-      var payload;
-      try {
-        payload = decodeJwtPayload(decodedText);
+var payload;
+
+decodedText = decodedText.trim();
+
+try {
+    payload = decodeJwtPayload(decodedText);
       } catch (err) {
         setStatus('Decode failed: ' + err.message, 'err');
         resumeAfterDelay();
